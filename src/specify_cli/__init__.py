@@ -35,6 +35,9 @@ import json
 from pathlib import Path
 from typing import Optional, Tuple
 
+# Import claude-flow adapter for the flow subcommand
+from specify_cli.claude_flow_adapter import flow_app
+
 import typer
 import httpx
 from rich.console import Console
@@ -358,6 +361,9 @@ app = typer.Typer(
     invoke_without_command=True,
     cls=BannerGroup,
 )
+
+# Register the claude-flow adapter subcommand
+app.add_typer(flow_app, name="flow")
 
 def show_banner():
     """Display the ASCII art banner."""
@@ -1195,6 +1201,135 @@ def check():
 
     if not any(agent_results.values()):
         console.print("[dim]Tip: Install an AI assistant for the best experience[/dim]")
+
+
+# Checkpoint management subcommand group
+checkpoint_app = typer.Typer(
+    name="checkpoint",
+    help="Manage implementation checkpoints for resume capability",
+    add_completion=False,
+)
+app.add_typer(checkpoint_app, name="checkpoint")
+
+
+@checkpoint_app.command("list")
+def checkpoint_list():
+    """List all feature checkpoints with their progress status."""
+    from .checkpoints import list_checkpoints
+
+    checkpoints = list_checkpoints()
+
+    if not checkpoints:
+        console.print("[yellow]No checkpoints found.[/yellow]")
+        console.print("[dim]Checkpoints are created during /speckit.implement execution.[/dim]")
+        return
+
+    console.print("[bold]Implementation Checkpoints[/bold]\n")
+
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("Feature", style="green")
+    table.add_column("Progress", justify="right")
+    table.add_column("Current Task", style="cyan")
+    table.add_column("Last Updated", style="dim")
+
+    for cp in checkpoints:
+        progress = f"{cp['completed_tasks']}/{cp['total_tasks']} ({cp['progress_percent']:.0f}%)"
+        current = cp['current_task'] or "-"
+        last_updated = cp['last_updated'][:19] if cp['last_updated'] else "-"
+
+        # Add failed indicator if any tasks failed
+        if cp.get('failed_tasks', 0) > 0:
+            progress += f" [red]({cp['failed_tasks']} failed)[/red]"
+
+        table.add_row(cp['feature'], progress, current, last_updated)
+
+    console.print(table)
+
+
+@checkpoint_app.command("resume")
+def checkpoint_resume(
+    feature: str = typer.Argument(..., help="Feature name to resume implementation for"),
+):
+    """
+    Show checkpoint details for resuming implementation.
+
+    This command displays the checkpoint status and provides guidance
+    on how to resume the implementation using /speckit.implement.
+    """
+    from .checkpoints import get_checkpoint_summary, load_checkpoint
+
+    summary = get_checkpoint_summary(feature)
+
+    if summary is None:
+        console.print(f"[red]No checkpoint found for feature:[/red] {feature}")
+        console.print("[dim]Run /speckit.implement to start a new implementation.[/dim]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold]Checkpoint for feature: {summary['feature']}[/bold]\n")
+
+    # Progress summary
+    progress_panel = Panel(
+        f"[cyan]Started:[/cyan] {summary.get('started_at', 'N/A')[:19]}\n"
+        f"[cyan]Last Updated:[/cyan] {summary.get('last_updated', 'N/A')[:19]}\n"
+        f"[cyan]Progress:[/cyan] {summary['completed_count']}/{summary['total_tasks']} tasks "
+        f"({summary['progress_percent']:.1f}%)\n"
+        f"[green]Completed:[/green] {', '.join(summary['completed_tasks']) or 'None'}\n"
+        f"[red]Failed:[/red] {', '.join(summary['failed_tasks']) or 'None'}\n"
+        f"[yellow]Pending:[/yellow] {summary['pending_count']} tasks remaining\n"
+        f"[cyan]Current Task:[/cyan] {summary['current_task'] or 'N/A'}",
+        title="[bold]Checkpoint Status[/bold]",
+        border_style="cyan",
+        padding=(1, 2),
+    )
+    console.print(progress_panel)
+
+    # Instructions
+    console.print("\n[bold]To resume implementation:[/bold]")
+    console.print("  1. Navigate to your project directory")
+    console.print("  2. Run [cyan]/speckit.implement[/cyan] with your AI assistant")
+    console.print("  3. When prompted, choose 'yes' to resume from checkpoint")
+    console.print(f"\n[dim]Checkpoint file: .specify/checkpoints/{feature}.json[/dim]")
+
+
+@checkpoint_app.command("clear")
+def checkpoint_clear(
+    feature: str = typer.Argument(..., help="Feature name to clear checkpoint for"),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation prompt"),
+):
+    """
+    Clear (delete) the checkpoint for a feature.
+
+    This removes the checkpoint file, allowing a fresh start
+    for the implementation.
+    """
+    from .checkpoints import clear_checkpoints, get_checkpoint_summary
+
+    summary = get_checkpoint_summary(feature)
+
+    if summary is None:
+        console.print(f"[yellow]No checkpoint found for feature:[/yellow] {feature}")
+        raise typer.Exit(0)
+
+    if not force:
+        console.print(f"[bold]Checkpoint for feature: {summary['feature']}[/bold]")
+        console.print(f"Progress: {summary['completed_count']}/{summary['total_tasks']} tasks completed")
+
+        if summary['completed_count'] > 0:
+            console.print(f"[yellow]Warning: This will discard progress on {summary['completed_count']} completed task(s).[/yellow]")
+
+        confirm = typer.confirm("Are you sure you want to clear this checkpoint?")
+        if not confirm:
+            console.print("[yellow]Operation cancelled.[/yellow]")
+            raise typer.Exit(0)
+
+    success = clear_checkpoints(feature)
+
+    if success:
+        console.print(f"[green]Checkpoint cleared for feature:[/green] {feature}")
+    else:
+        console.print(f"[red]Failed to clear checkpoint for feature:[/red] {feature}")
+        raise typer.Exit(1)
+
 
 def main():
     app()
